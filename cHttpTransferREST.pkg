@@ -1,0 +1,216 @@
+﻿// Class: cHttpTransferREST
+//
+// An enhanced version of the cHttpTransfer class that stores received data
+// in a UChar array property (pucaData) (and also content type in psContentType).
+//
+// Provides a MakeJsonCall function for calling REST services.  OAuth2 is
+// assumed, as is JSON.
+//
+// The containing object (or a parent of it) is REQUIRED to provide the function
+// OAuth2AccessToken which should return the Access Token returned by the OAuth2
+// process.  (UNLESS pbRequireToken is set to False.)
+//
+// Revision:
+//     2023/03/07  (MJP, UIG)
+//        Added pbRequireToken to allow use in non-OAuth2 environments
+//        Added Extra headers (AddExtraHeader and ClearExtraHeaders) so you can
+//        add your own as required (i.e. you might do:
+//           AddExtraHeader "Authorization" "Basic: aGbfRfdfhgpRt4^fDDr4")
+//     2023/03/06  (MJP, UIG)
+//        Added the pbDefeatCaching property & if True (the default) will add
+//        a RandomHexUUID to the query string to do that, so that repeated calls
+//        to the same resource will get fresh results.
+//     2022/06/10  (MJP, UIG) 
+//        Initial version: 1.0
+//
+
+Use cHttpTransfer.pkg
+Use WinUuid.pkg
+
+Enum_List
+    Define C_httpNoJson for -1
+    Define C_httpOK
+    Define C_httpCallFailed
+    Define C_httpBadStatus
+    Define C_httpJsonParseFail
+    Define C_httpNoAccessToken
+End_Enum_List
+
+// NOTE: This function MUST exist in an object parent in order to give objects
+//       of the class access to the AccessToken returned by the OAuth2 login
+//       process and MUST return that token!  (Unless you set pbRequireToken
+//       to False)
+Register_Function OAuth2AccessToken Returns String
+
+Class cHttpTransferREST is a cHttpTransfer
+    
+    Procedure Construct_Object
+        Forward Send Construct_Object
+        
+        Property UChar[]  pucaData
+        Property String   psContentType     ""
+        Property Integer  piError           C_httpOK  // Zero
+        Property String   psError           ""
+        Property String   psAcceptTypes     "*/*"
+        Property String   psSendType        "application/json"
+        Property Boolean  pbDefeatCaching   True
+        Property Boolean  pbRequireToken    True
+        Property String[] pasHeaderNames
+        Property String[] pasHeaderValues
+
+        Set piRemotePort    to rpHttpSSL
+        Set peTransferFlags to ifSecure
+    End_Procedure
+        
+    Procedure OnDataReceived String sContentType String sData
+        UChar[] ucaData
+        
+        Get pucaData        to ucaData
+        Set pucaData        to (AppendArray(ucaData, StringToUCharArray(sData)))
+        Set psContentType   to sContentType
+    End_Procedure
+    
+    Procedure AddExtraHeader String sName String sValue
+        String[] asNames asValues
+        Integer  iIdx iEnd
+        
+        Get pasHeaderNames to asNames
+        Move (SearchArray(asNames, sName)) to iIdx
+        
+        If (iIdx = -1) Begin  // Not already in array
+            Move (SizeOfArray(asNames)) to iEnd
+            Get pasHeaderValues         to asValues
+            Move sName                  to asNames[iEnd]
+            Move sValue                 to asValues[iEnd]
+            Set pasHeaderNames          to asNames
+            Set pasHeaderValues         to asValues
+        End
+        
+    End_Procedure
+    
+    Procedure ClearExtraHeaders
+        String[] asEmpty
+        
+        Set pasHeaderNames  to asEmpty
+        Set pasHeaderValues to asEmpty
+    End_Procedure
+    
+    Procedure Reset
+        UChar[] empty
+        
+        Set pucaData        to empty
+        Set psContentType   to ""
+        Set piError         to C_httpOK  // Zero! ;-)
+        Set psError         to ""
+        Send ClearHeaders
+    End_Procedure
+    
+    Function psData Returns String
+        Function_Return (UCharArrayToString(pucaData(Self)))
+    End_Function
+    
+    Function MakeJsonCall String sVerb String sPath String sParams Handle hoBody Returns Handle
+        Handle   hoJson
+        Integer  iOK iStatus iHdrs i
+        Boolean  bOK
+        String   sData sBody sToken
+        String[] asHdrNames asHdrVals
+        
+        Move (Uppercase(sVerb)) to sVerb  // Probably not required ;-)
+        
+        Send Reset
+        
+        If (pbRequireToken(Self)) Begin
+            Get OAuth2AccessToken   to sToken
+        
+            If (sToken = "") Begin
+                Set piError to C_httpNoAccessToken
+                Set psError to "No OAuth2 access token"
+                Function_Return 0
+            End
+            
+        End
+        
+        // Add required headers:
+        Get AddHeader "Content-Type"      (psSendType(Self))    to iOK
+        Get AddHeader "Accept"            (psAcceptTypes(Self)) to iOK
+        If (sToken <> "") ;
+            Get AddHeader "Authorization" ("Bearer" * sToken)   to iOK
+        
+        // Deal with any extra headers
+        Get pasHeaderNames to asHdrNames
+        Move (SizeOfArray(asHdrNames)) to iHdrs
+         
+        If iHdrs Begin
+            Get pasHeaderValues to asHdrVals
+            Decrement iHdrs
+            
+            For i from 0 to iHdrs
+                Get AddHeader asHdrNames[i] asHdrVals to iOK
+            Loop
+            
+        End
+        
+        // To defeat cacheing, we add a "nonce" set to a random hex UUID to the
+        // query string - after any real parameters we are passed, if any:
+        If (pbDefeatCaching(Self)) Begin
+            If (sParams = "") ;
+                Move (sPath + "?nonce=" + RandomHexUUID())                  to sPath
+            Else ;
+                Move (sPath + "?" + sParams + "&nonce=" + RandomHexUUID())  to sPath
+        End
+        Else If (sParams <> "") ;
+            Move (sPath + "?" + sParams)                                    to sPath
+        
+        // Assumes that only POST, PUT and PATCH verbs will have a body:
+        If (((sVerb = "POST") or (sVerb = "PUT") or (sVerb = "PATCH")) and hoBody) ;
+            Get Stringify of hoBody to sBody
+        
+        // Make the call
+        Get HttpVerbAddrRequest sPath (AddressOf(sBody)) (SizeOfString(sBody)) False sVerb to iOK
+        
+        If iOK Begin
+            Get ResponseStatusCode  to iStatus
+            Get psData              to sData
+            
+            If ((iStatus >= 200) and (iStatus < 300)) Begin
+                
+                // If no JSON was returned, then return -1, indicating that, 
+                // which may be perfectly correct in some cases 
+                // (HTTP 204 - No Content, for instance).
+                If (SizeOfString(sData) < 2) ;  // 2 chars is the minimum JSON
+                    Function_Return C_httpNoJson
+
+                Get Create (RefClass(cJsonObject)) to hoJson
+                Set pbRequireAllMembers of hoJson to False
+                Set pbEscapeForwardSlash of hoJson to False
+                Get ParseString of hoJson sData to bOK
+                
+                If bOK ;
+                    Function_Return hoJson  // Success! Now caller's responsibility to destroy.
+                
+                // So if parsing failed:
+                Set piError to C_httpJsonParseFail
+                Set psError to ('Http Call to "' + psRemoteHost(Self) + '/' + sPath + "'" * ;
+                                'returned invalid JSON. Parse error:' * ;
+                                psParseError(hoJson))
+                Send Destroy of hoJson
+            End
+            Else Begin  // Not a 2xx status
+                Set piError to C_httpBadStatus
+                Set psError to ('HTTP Call to "' + psRemoteHost(Self) + '/' + sPath + '"' * ;
+                                'returned a status of' * String(iStatus) * '-' * ;
+                                ResponseStatusText(Self) * ;
+                                "(" + sData + ")")
+            End
+            
+        End
+        Else Begin  // Call returned 0
+            Set piError to C_httpCallFailed
+            Set psError to ('HTTP Call to "' + psRemoteHost(Self) + '/' + sPath + '" failed')
+        End
+        
+        Function_Return 0  // Indicates failure: check piError and psError for reason
+    End_Function
+    
+End_Class

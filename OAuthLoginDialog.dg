@@ -1,0 +1,165 @@
+﻿Use Windows.pkg
+Use cWebView2Browser.pkg
+Use cTimer.pkg
+
+Enum_List
+    Define C_notLoggedIn
+    Define C_loginOK
+    Define C_loginFail
+    Define C_loggedOut
+    Define C_loggedIn
+End_Enum_List
+
+Object oOAuthLoginDialog is a ModalPanel
+    Set Size to 304 354
+    Set Label to "Login Dialog"
+    Set piMinSize to 300 350
+    Set Location to 2 2
+    Set Border_Style To Border_Thick
+    Set Locate_Mode to CENTER_ON_PANEL
+    
+    Property Boolean pbLoggedIn         False
+    Property String  psCode             ""
+    Property String  psState            ""
+    Property String  psURL              ""
+    Property String  psRedirUrl         ""
+    Property Boolean pbLoggingIn        False
+    Property Integer piTimerInterval    200 // 5th of a second
+    Property String  psResponse         ""
+
+    Object oOAuthLogin is a cWebView2Browser
+        Set Size to 300 350
+        Set Location to 0 0
+
+        Procedure Activating
+            Set piTimeout of oLoginTimer to (piTimerInterval(Self))
+            Set pbEnabled of oLoginTimer to True
+        End_Procedure
+
+    End_Object
+    
+    Procedure Popup
+        If (pbLoggingIn(Self)) ;
+            Set Label to "Login"
+        Else ;
+            Set Label to "Logout"
+
+        Set psLocationURL of oOAuthLogin to (psURL(Self))
+        Forward Send Popup
+    End_Procedure
+    
+    Function ParseQueryString String sQStr Returns String[][]
+        Integer    iPos i iLast
+        String[]   asParts
+        String[][] asParams
+        
+        Move (StrSplitToArray(sQStr, "&")) to asParts
+        
+        Move (SizeOfArray(asParts) - 1) to iLast
+        
+        For i from 0 to iLast
+            Move (StrSplitToArray(asParts[i], "=")) to asParams[i]
+        Loop
+        
+        Function_Return asParams
+    End_Function
+
+    Function CheckLogin Returns Integer
+        String     sURL sResponse sCode sRedir sState sSessState sPassedState
+        String[][] asParams
+        Integer    i iLast
+        
+        Get psLocationURL of oOAuthLogin    to sURL
+        Get psRedirURL                      to sRedir
+        
+        If (pbLoggingIn(Self)) Begin
+        
+            If (Left(sURL, Length(sRedir)) = sRedir) Begin
+                Move (Replace((sRedir + "?"), sURL, ""))    to sResponse
+                Set psResponse                              to sResponse
+                
+                Move (ParseQueryString(Self, sResponse))    to asParams
+                Move (SizeOfArray(asParams) - 1)            to iLast
+                
+                For i from 0 to iLast
+                    If (asParams[i][0] = "code") ;
+                        Move asParams[i][1] to sCode
+                    If (asParams[i][0] = "state") ;
+                        Move asParams[i][1] to sState
+                    If (asParams[i][0] = "session_state") ;
+                        Move asParams[i][1] to sSessState
+                    If (asParams[i][0] = "error")
+                    // ToDo: Should actually cater for error responses here...
+                Loop
+                
+                Set psState to sState
+                Set psCode to sCode
+                
+                If (sCode <> "") ;
+                    Function_Return C_loginOK
+                Else ;
+                    Function_Return C_loginFail
+            End
+            
+            Function_Return C_notLoggedIn
+        End
+        Else Begin  // So logging out...
+            
+            // ToDo: This doesn't work... MS Graph doesn't seem to actually
+            // redirect us to the "post_logout_redirect_uri" :-(
+            If (Left(sURL, Length(sRedir)) = sRedir) Begin
+                Function_Return C_loggedOut
+            End
+            
+        End
+        
+    End_Function
+    
+    Object oLoginTimer is a cTimer
+        
+        Procedure OnTimer
+            Integer iLoginResult
+            
+            Get CheckLogin  to iLoginResult
+            
+            Case Begin
+                
+                Case (iLoginResult = C_loginOK)
+                    Send LoginOK
+                    Case Break
+                
+                Case (iLoginResult = C_loginFail)
+                    Send LoginFail
+                    Case Break
+                    
+                Case (iLoginResult = C_loggedOut)
+                    Send LoggedOut
+                    Case Break
+                
+            Case End
+            
+        End_Procedure
+
+    End_Object
+
+    Procedure LoginOK
+        Set pbLoggedIn to True
+        Send Deactivate
+    End_Procedure
+    
+    Procedure LoginFail
+        Set pbLoggedIn to False
+        Send Deactivate
+    End_Procedure
+    
+    Procedure LoggedOut
+        Set pbLoggedIn to False
+        Send Deactivate
+    End_Procedure
+    
+    Procedure Deactivate
+        Set pbEnabled of oLoginTimer to False
+        Forward Send Deactivate
+    End_Procedure
+    
+End_Object
